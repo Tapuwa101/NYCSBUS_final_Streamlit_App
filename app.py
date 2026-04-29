@@ -237,59 +237,48 @@ def normalize_borough(series: pd.Series) -> pd.Series:
     return series.astype(str).str.strip().str.lower().map(fixed).fillna(series.astype(str).str.title())
 
 
-def prepare_geo(df: pd.DataFrame) -> pd.DataFrame:
-    df = clean_columns(df)
-    lat_col = first_existing(df, ["center_lat", "centroid_lat", "latitude", "lat"])
-    lon_col = first_existing(df, ["center_lon", "centroid_lon", "longitude", "lon", "lng"])
+def prepare_geo(df):
+    df = df.copy()
 
-    if lat_col and lon_col:
-        df["lat"] = pd.to_numeric(df[lat_col], errors="coerce")
-        df["lon"] = pd.to_numeric(df[lon_col], errors="coerce")
+    # Standardize latitude and longitude column names
+    if "latitude" not in df.columns:
+        for col in ["lat", "Latitude", "LAT"]:
+            if col in df.columns:
+                df["latitude"] = df[col]
+                break
 
-    borough_col = first_existing(df, ["borough", "boro", "boro_name"])
-    if borough_col:
-        df["borough"] = normalize_borough(df[borough_col])
-    else:
-        df["borough"] = "Unknown"
+    if "longitude" not in df.columns:
+        for col in ["lon", "lng", "Longitude", "LON", "LNG"]:
+            if col in df.columns:
+                df["longitude"] = df[col]
+                break
 
-    date_col = first_existing(df, ["time_bin", "week_start", "date", "period", "timestamp", "crash_date"])
-    if date_col:
-        df["event_date"] = pd.to_datetime(df[date_col], errors="coerce")
-    else:
-        df["event_date"] = pd.NaT
+    # Create severity if missing
+    if "severity" not in df.columns:
+        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+        if numeric_cols:
+            df["severity"] = df[numeric_cols[0]]
+        else:
+            df["severity"] = 0
 
-    alarm_col = first_existing(df, ["alarm_type", "type", "status", "signal"])
-    if alarm_col:
-        df["alarm_type"] = df[alarm_col].astype(str).str.title()
-    else:
-        df["alarm_type"] = "Review"
+    df["severity"] = pd.to_numeric(df["severity"], errors="coerce").fillna(0)
 
-    severity_col = first_existing(df, ["severity", "risk_score", "score", "zscore", "z_score", "crash_count", "alarm_score"])
-    if severity_col:
-        df["severity"] = pd.to_numeric(df[severity_col], errors="coerce")
-    else:
-        df["severity"] = 1.0
+    def assign_risk_level(value):
+        try:
+            value = float(value)
+        except Exception:
+            return "Unknown"
 
-    df["severity"] = df["severity"].fillna(df["severity"].median() if df["severity"].notna().any() else 1.0)
-    df["risk_level"] = pd.cut(
-        df["severity"],
-        bins=[-np.inf, df["severity"].quantile(0.50), df["severity"].quantile(0.80), np.inf],
-        labels=["Low", "Medium", "High"],
-        duplicates="drop",
-    )
-    df["risk_level"] = df["risk_level"].astype(str).replace("nan", "Medium")
+        if value >= 75:
+            return "Critical"
+        elif value >= 50:
+            return "High"
+        elif value >= 25:
+            return "Moderate"
+        else:
+            return "Low"
 
-    df["recommended_action"] = np.select(
-        [
-            df["risk_level"].eq("High"),
-            df["risk_level"].eq("Medium"),
-        ],
-        [
-            "Immediate route review and targeted operational follow-up",
-            "Monitor trend and review recent route conditions",
-        ],
-        default="Keep in monitoring queue",
-    )
+    df["risk_level"] = df["severity"].apply(assign_risk_level)
 
     return df
 
