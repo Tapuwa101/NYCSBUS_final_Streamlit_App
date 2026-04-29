@@ -1,0 +1,14 @@
+# Mac system files
+.DS_Store
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Environment files
+.env
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
