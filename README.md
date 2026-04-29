@@ -1,4 +1,4 @@
-#NYCSBUS Operations Intelligence Dashboard
+## NYCSBUS Operations Intelligence Dashboard
 
 This project is a public-safe Streamlit dashboard inspired by my NYCSBUS transportation analytics work. It demonstrates how operational data can be transformed into route-level risk scores, hotspot detection, anomaly flags, trend validation, and action-oriented review queues.
 
