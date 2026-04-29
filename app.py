@@ -19,7 +19,7 @@ import streamlit as st
 
 try:
     import pydeck as pdk
-except Exception:  # pragma: no cover
+except Exception:
     pdk = None
 
 
@@ -114,7 +114,7 @@ st.markdown(
     .metric-card {
         padding: 1.1rem 1.2rem;
         border-radius: 22px;
-        background: rgba(255,255,255,0.86);
+        background: rgba(255,255,255,0.88);
         border: 1px solid rgba(148, 163, 184, 0.25);
         box-shadow: 0 16px 42px rgba(15, 23, 42, 0.08);
         min-height: 130px;
@@ -144,7 +144,7 @@ st.markdown(
     .section-card {
         padding: 1.25rem 1.35rem;
         border-radius: 24px;
-        background: rgba(255,255,255,0.88);
+        background: rgba(255,255,255,0.90);
         border: 1px solid rgba(148, 163, 184, 0.25);
         box-shadow: 0 16px 42px rgba(15, 23, 42, 0.07);
         margin-bottom: 1rem;
@@ -172,10 +172,6 @@ st.markdown(
         font-size: 0.92rem;
     }
 
-    .risk-high { color: #dc2626; font-weight: 850; }
-    .risk-medium { color: #ea580c; font-weight: 850; }
-    .risk-low { color: #16a34a; font-weight: 850; }
-
     div[data-testid="stDataFrame"] {
         border-radius: 18px;
         overflow: hidden;
@@ -194,9 +190,10 @@ st.markdown(
 
 
 # -----------------------------------------------------------------------------
-# Data helpers
+# Constants
 # -----------------------------------------------------------------------------
 DATA_DIR = Path(__file__).parent
+
 DEFAULT_FILES = {
     "alarms": DATA_DIR / "alarms_from_crashes_demo.csv",
     "hotspots": DATA_DIR / "hotspots_from_crashes_demo.csv",
@@ -206,13 +203,18 @@ DEFAULT_FILES = {
 }
 
 BOROUGH_ORDER = ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]
+RISK_ORDER = ["Critical", "High", "Moderate", "Low"]
 NYC_CENTER = [40.7128, -74.0060]
 
 
+# -----------------------------------------------------------------------------
+# Data helpers
+# -----------------------------------------------------------------------------
 def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [
-        str(c).strip().lower().replace(" ", "_").replace("-", "_") for c in df.columns
+        str(c).strip().lower().replace(" ", "_").replace("-", "_")
+        for c in df.columns
     ]
     return df
 
@@ -227,71 +229,201 @@ def first_existing(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
 def normalize_borough(series: pd.Series) -> pd.Series:
     fixed = {
         "new york": "Manhattan",
-        "richmond": "Staten Island",
-        "staten island": "Staten Island",
-        "bronx": "Bronx",
+        "manhattan": "Manhattan",
+        "kings": "Brooklyn",
         "brooklyn": "Brooklyn",
         "queens": "Queens",
-        "manhattan": "Manhattan",
+        "bronx": "Bronx",
+        "richmond": "Staten Island",
+        "staten island": "Staten Island",
     }
-    return series.astype(str).str.strip().str.lower().map(fixed).fillna(series.astype(str).str.title())
+
+    lower = series.astype(str).str.strip().str.lower()
+    return lower.map(fixed).fillna(series.astype(str).str.title())
 
 
-def prepare_geo(df):
-    df = df.copy()
+def assign_risk_level(value: float) -> str:
+    try:
+        value = float(value)
+    except Exception:
+        return "Unknown"
 
-    # Standardize latitude and longitude column names
-    if "latitude" not in df.columns:
-        for col in ["lat", "Latitude", "LAT"]:
-            if col in df.columns:
-                df["latitude"] = df[col]
-                break
+    if value >= 75:
+        return "Critical"
+    if value >= 50:
+        return "High"
+    if value >= 25:
+        return "Moderate"
+    return "Low"
 
-    if "longitude" not in df.columns:
-        for col in ["lon", "lng", "Longitude", "LON", "LNG"]:
-            if col in df.columns:
-                df["longitude"] = df[col]
-                break
 
-    # Create severity if missing
-    if "severity" not in df.columns:
+def prepare_geo(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Standardizes messy CSV inputs so the Streamlit app does not break if
+    column names differ slightly across files.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = clean_columns(df)
+
+    # Standardize borough
+    borough_col = first_existing(
+        df,
+        ["borough", "boro", "county", "city_borough", "nyc_borough"],
+    )
+    if borough_col:
+        df["borough"] = normalize_borough(df[borough_col])
+    else:
+        df["borough"] = "Unknown"
+
+    # Standardize latitude and longitude
+    lat_col = first_existing(
+        df,
+        ["lat", "latitude", "y", "point_latitude", "crash_latitude"],
+    )
+    lon_col = first_existing(
+        df,
+        ["lon", "lng", "long", "longitude", "x", "point_longitude", "crash_longitude"],
+    )
+
+    if lat_col:
+        df["lat"] = pd.to_numeric(df[lat_col], errors="coerce")
+    else:
+        df["lat"] = np.nan
+
+    if lon_col:
+        df["lon"] = pd.to_numeric(df[lon_col], errors="coerce")
+    else:
+        df["lon"] = np.nan
+
+    # Standardize date
+    date_col = first_existing(
+        df,
+        ["event_date", "date", "crash_date", "week", "created_date", "timestamp"],
+    )
+    if date_col:
+        df["event_date"] = pd.to_datetime(df[date_col], errors="coerce")
+    else:
+        df["event_date"] = pd.NaT
+
+    # Standardize alarm/signal type
+    alarm_col = first_existing(
+        df,
+        [
+            "alarm_type",
+            "signal_type",
+            "type",
+            "category",
+            "alert_type",
+            "metric",
+            "analysis_type",
+        ],
+    )
+    if alarm_col:
+        df["alarm_type"] = df[alarm_col].astype(str).str.replace("_", " ").str.title()
+    else:
+        df["alarm_type"] = "Operational Signal"
+
+    # Standardize severity
+    severity_col = first_existing(
+        df,
+        [
+            "severity",
+            "severity_score",
+            "risk_score",
+            "score",
+            "alarm_score",
+            "crash_count",
+            "count",
+            "signals",
+            "hotspot_score",
+        ],
+    )
+
+    if severity_col:
+        df["severity"] = pd.to_numeric(df[severity_col], errors="coerce")
+    else:
         numeric_cols = df.select_dtypes(include="number").columns.tolist()
-        if numeric_cols:
-            df["severity"] = df[numeric_cols[0]]
+        usable_numeric = [c for c in numeric_cols if c not in ["lat", "lon"]]
+        if usable_numeric:
+            df["severity"] = pd.to_numeric(df[usable_numeric[0]], errors="coerce")
         else:
             df["severity"] = 0
 
-    df["severity"] = pd.to_numeric(df["severity"], errors="coerce").fillna(0)
+    df["severity"] = df["severity"].fillna(0)
 
-    def assign_risk_level(value):
-        try:
-            value = float(value)
-        except Exception:
-            return "Unknown"
+    # Normalize severity to a 0-100 style score only if the values are tiny or huge.
+    max_severity = df["severity"].max()
+    min_severity = df["severity"].min()
 
-        if value >= 75:
-            return "Critical"
-        elif value >= 50:
-            return "High"
-        elif value >= 25:
-            return "Moderate"
+    if max_severity > 100 or max_severity <= 10:
+        if max_severity != min_severity:
+            df["severity"] = (
+                (df["severity"] - min_severity)
+                / (max_severity - min_severity)
+                * 100
+            )
         else:
-            return "Low"
+            df["severity"] = 50
 
+    df["severity"] = df["severity"].clip(lower=0, upper=100)
     df["risk_level"] = df["severity"].apply(assign_risk_level)
+
+    # Recommended action
+    action_col = first_existing(
+        df,
+        ["recommended_action", "action", "recommendation", "next_step"],
+    )
+    if action_col:
+        df["recommended_action"] = df[action_col].astype(str)
+    else:
+        df["recommended_action"] = df["risk_level"].map(
+            {
+                "Critical": "Immediate operations review recommended",
+                "High": "Prioritize for route or safety review",
+                "Moderate": "Monitor for repeated pattern",
+                "Low": "Track as baseline operational signal",
+            }
+        ).fillna("Review signal")
 
     return df
 
 
 @st.cache_data(show_spinner=False)
 def load_default_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    alarms_path = DEFAULT_FILES["alarms"] if DEFAULT_FILES["alarms"].exists() else DEFAULT_FILES["spatiotemporal"]
-    hotspots_path = DEFAULT_FILES["hotspots"] if DEFAULT_FILES["hotspots"].exists() else DEFAULT_FILES["hotspot_analysis"]
+    alarms_path = (
+        DEFAULT_FILES["alarms"]
+        if DEFAULT_FILES["alarms"].exists()
+        else DEFAULT_FILES["spatiotemporal"]
+    )
+
+    hotspots_path = (
+        DEFAULT_FILES["hotspots"]
+        if DEFAULT_FILES["hotspots"].exists()
+        else DEFAULT_FILES["hotspot_analysis"]
+    )
+
     trend_path = DEFAULT_FILES["trend"]
 
-    alarms = prepare_geo(pd.read_csv(alarms_path)) if alarms_path.exists() else pd.DataFrame()
-    hotspots = prepare_geo(pd.read_csv(hotspots_path)) if hotspots_path.exists() else pd.DataFrame()
-    trends = prepare_geo(pd.read_csv(trend_path)) if trend_path.exists() else pd.DataFrame()
+    alarms = (
+        prepare_geo(pd.read_csv(alarms_path))
+        if alarms_path.exists()
+        else pd.DataFrame()
+    )
+
+    hotspots = (
+        prepare_geo(pd.read_csv(hotspots_path))
+        if hotspots_path.exists()
+        else pd.DataFrame()
+    )
+
+    trends = (
+        prepare_geo(pd.read_csv(trend_path))
+        if trend_path.exists()
+        else pd.DataFrame()
+    )
+
     return alarms, hotspots, trends
 
 
@@ -310,19 +442,30 @@ def load_uploaded_or_default() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame
     alarms = prepare_geo(pd.read_csv(alarms_file)) if alarms_file else pd.DataFrame()
     hotspots = prepare_geo(pd.read_csv(hotspots_file)) if hotspots_file else pd.DataFrame()
     trends = prepare_geo(pd.read_csv(trends_file)) if trends_file else pd.DataFrame()
+
     return alarms, hotspots, trends
 
 
-def filter_data(df: pd.DataFrame, boroughs: list[str], risk_levels: list[str], alarm_types: list[str]) -> pd.DataFrame:
+def filter_data(
+    df: pd.DataFrame,
+    boroughs: list[str],
+    risk_levels: list[str],
+    alarm_types: list[str],
+) -> pd.DataFrame:
     if df.empty:
         return df
+
     out = df.copy()
+
     if "borough" in out.columns and boroughs:
         out = out[out["borough"].isin(boroughs)]
+
     if "risk_level" in out.columns and risk_levels:
         out = out[out["risk_level"].isin(risk_levels)]
+
     if "alarm_type" in out.columns and alarm_types:
         out = out[out["alarm_type"].isin(alarm_types)]
+
     return out
 
 
@@ -352,22 +495,33 @@ def insight_card(title: str, text: str) -> None:
 
 
 def build_map(df: pd.DataFrame) -> None:
-    if df.empty or pdk is None or not {"lat", "lon"}.issubset(df.columns):
+    if df.empty or not {"lat", "lon"}.issubset(df.columns):
         st.info("Map will appear once latitude and longitude fields are available.")
         return
 
     points = df.dropna(subset=["lat", "lon"]).copy()
+
     if points.empty:
         st.info("No geocoded records available for the current filters.")
         return
 
+    if pdk is None:
+        st.map(points.rename(columns={"lat": "latitude", "lon": "longitude"}))
+        return
+
     risk_color = {
+        "Critical": [220, 38, 38, 210],
         "High": [239, 68, 68, 185],
-        "Medium": [245, 158, 11, 170],
+        "Moderate": [245, 158, 11, 175],
         "Low": [34, 197, 94, 155],
     }
-    points["color"] = points["risk_level"].map(risk_color).apply(lambda x: x if isinstance(x, list) else [59, 130, 246, 155])
-    points["radius"] = np.clip(points["severity"].rank(pct=True) * 220, 70, 220)
+
+    points["color"] = points["risk_level"].map(risk_color)
+    points["color"] = points["color"].apply(
+        lambda x: x if isinstance(x, list) else [59, 130, 246, 155]
+    )
+
+    points["radius"] = np.clip(points["severity"].rank(pct=True) * 230, 75, 230)
 
     layer = pdk.Layer(
         "ScatterplotLayer",
@@ -380,20 +534,25 @@ def build_map(df: pd.DataFrame) -> None:
     )
 
     view_state = pdk.ViewState(
-        latitude=float(points["lat"].median()) if points["lat"].notna().any() else NYC_CENTER[0],
-        longitude=float(points["lon"].median()) if points["lon"].notna().any() else NYC_CENTER[1],
+        latitude=float(points["lat"].median()),
+        longitude=float(points["lon"].median()),
         zoom=10.35,
         pitch=35,
     )
 
     tooltip = {
-        "html": "<b>{borough}</b><br/>Alarm: {alarm_type}<br/>Risk: {risk_level}<br/>Severity: {severity}<br/>{recommended_action}",
+        "html": """
+        <b>{borough}</b><br/>
+        Signal: {alarm_type}<br/>
+        Risk: {risk_level}<br/>
+        Severity: {severity}<br/>
+        Action: {recommended_action}
+        """,
         "style": {"backgroundColor": "#0f172a", "color": "white"},
     }
 
     st.pydeck_chart(
         pdk.Deck(
-            map_style="mapbox://styles/mapbox/light-v10",
             initial_view_state=view_state,
             layers=[layer],
             tooltip=tooltip,
@@ -404,7 +563,7 @@ def build_map(df: pd.DataFrame) -> None:
 
 def render_empty_state() -> None:
     st.warning(
-        "No data was found. Keep 'Use demo data from repo' on, or upload an alarms CSV with latitude and longitude fields."
+        "No data was found. Keep 'Use demo data from repo' on, or upload a CSV with latitude and longitude fields."
     )
 
 
@@ -422,14 +581,54 @@ base_df = alarms_df if not alarms_df.empty else hotspots_df
 with st.sidebar:
     st.markdown("---")
     st.markdown("### Filters")
-    available_boroughs = [b for b in BOROUGH_ORDER if b in set(base_df.get("borough", pd.Series(dtype=str)))]
-    if not available_boroughs:
-        available_boroughs = sorted(base_df.get("borough", pd.Series(dtype=str)).dropna().unique().tolist())
 
-    boroughs = st.multiselect("Borough", available_boroughs, default=available_boroughs)
-    risk_levels = st.multiselect("Risk level", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
-    alarm_types_available = sorted(base_df.get("alarm_type", pd.Series(dtype=str)).dropna().unique().tolist())
-    alarm_types = st.multiselect("Signal type", alarm_types_available, default=alarm_types_available)
+    if "borough" in base_df.columns:
+        present_boroughs = set(base_df["borough"].dropna().unique().tolist())
+        available_boroughs = [b for b in BOROUGH_ORDER if b in present_boroughs]
+
+        extra_boroughs = sorted(
+            [b for b in present_boroughs if b not in BOROUGH_ORDER and b != "Unknown"]
+        )
+
+        available_boroughs = available_boroughs + extra_boroughs
+
+        if not available_boroughs:
+            available_boroughs = sorted(base_df["borough"].dropna().unique().tolist())
+    else:
+        available_boroughs = []
+
+    boroughs = st.multiselect(
+        "Borough",
+        available_boroughs,
+        default=available_boroughs,
+    )
+
+    if "risk_level" in base_df.columns:
+        present_risks = set(base_df["risk_level"].dropna().unique().tolist())
+        available_risks = [r for r in RISK_ORDER if r in present_risks]
+        extra_risks = sorted([r for r in present_risks if r not in RISK_ORDER])
+        available_risks = available_risks + extra_risks
+    else:
+        available_risks = RISK_ORDER
+
+    risk_levels = st.multiselect(
+        "Risk level",
+        available_risks,
+        default=available_risks,
+    )
+
+    if "alarm_type" in base_df.columns:
+        alarm_types_available = sorted(
+            base_df["alarm_type"].dropna().unique().tolist()
+        )
+    else:
+        alarm_types_available = []
+
+    alarm_types = st.multiselect(
+        "Signal type",
+        alarm_types_available,
+        default=alarm_types_available,
+    )
 
     st.markdown("---")
     st.markdown("### Interview framing")
@@ -439,7 +638,10 @@ with st.sidebar:
 
 filtered = filter_data(base_df, boroughs, risk_levels, alarm_types)
 
+
+# -----------------------------------------------------------------------------
 # Hero
+# -----------------------------------------------------------------------------
 st.markdown(
     """
     <div class="hero-card">
@@ -461,47 +663,111 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# -----------------------------------------------------------------------------
 # KPIs
+# -----------------------------------------------------------------------------
 total_signals = len(filtered)
-high_risk = int((filtered.get("risk_level", pd.Series(dtype=str)) == "High").sum()) if not filtered.empty else 0
-borough_count = filtered["borough"].nunique() if "borough" in filtered.columns and not filtered.empty else 0
-avg_severity = filtered["severity"].mean() if "severity" in filtered.columns and not filtered.empty else 0
+
+if not filtered.empty and "risk_level" in filtered.columns:
+    priority_signals = int(
+        filtered["risk_level"].isin(["Critical", "High"]).sum()
+    )
+else:
+    priority_signals = 0
+
+borough_count = (
+    filtered["borough"].nunique()
+    if "borough" in filtered.columns and not filtered.empty
+    else 0
+)
+
+avg_severity = (
+    filtered["severity"].mean()
+    if "severity" in filtered.columns and not filtered.empty
+    else 0
+)
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-with kpi1:
-    metric_card("Signals in Review", f"{total_signals:,}", "Filtered operational alerts in the current view")
-with kpi2:
-    metric_card("High-Risk Signals", f"{high_risk:,}", "Items that should be prioritized first")
-with kpi3:
-    metric_card("Boroughs Covered", f"{borough_count:,}", "Geographic coverage in the selected slice")
-with kpi4:
-    metric_card("Avg. Severity", f"{avg_severity:,.2f}", "Normalized score for risk comparison")
 
+with kpi1:
+    metric_card(
+        "Signals in Review",
+        f"{total_signals:,}",
+        "Filtered operational alerts in the current view",
+    )
+
+with kpi2:
+    metric_card(
+        "Priority Signals",
+        f"{priority_signals:,}",
+        "Critical and high-risk items to review first",
+    )
+
+with kpi3:
+    metric_card(
+        "Boroughs Covered",
+        f"{borough_count:,}",
+        "Geographic coverage in the selected slice",
+    )
+
+with kpi4:
+    metric_card(
+        "Avg. Severity",
+        f"{avg_severity:,.2f}",
+        "Normalized score for risk comparison",
+    )
+
+
+# -----------------------------------------------------------------------------
 # Executive summary
+# -----------------------------------------------------------------------------
 st.markdown("### Executive Summary")
+
 s1, s2, s3 = st.columns(3)
+
 with s1:
-    top_borough = filtered["borough"].value_counts().idxmax() if not filtered.empty and "borough" in filtered.columns else "N/A"
+    if not filtered.empty and "borough" in filtered.columns:
+        top_borough = filtered["borough"].value_counts().idxmax()
+    else:
+        top_borough = "N/A"
+
     insight_card(
         "Where attention is concentrated",
         f"The current filter shows the highest number of review signals in <b>{top_borough}</b>. This helps an operations lead quickly decide where to start instead of scanning raw rows.",
     )
+
 with s2:
-    priority_text = "High-risk items are present and should be reviewed first." if high_risk else "No high-risk items appear in the current filter."
+    if priority_signals:
+        priority_text = "Priority items are present and should be reviewed first."
+    else:
+        priority_text = "No critical or high-risk items appear in the current filter."
+
     insight_card(
         "What needs action",
         f"{priority_text} The dashboard converts raw signal severity into a practical review queue for non-technical stakeholders.",
     )
+
 with s3:
     insight_card(
         "Why it matters",
         "The workflow is reusable: ingest data, compute signals, validate patterns, and surface decision-ready recommendations through a clean app interface.",
     )
 
+
+# -----------------------------------------------------------------------------
 # Tabs
+# -----------------------------------------------------------------------------
 tab_overview, tab_map, tab_trends, tab_review, tab_snowflake = st.tabs(
-    ["Overview", "Map", "Trend Validation", "Review Queue", "Snowflake Interview Story"]
+    [
+        "Overview",
+        "Map",
+        "Trend Validation",
+        "Review Queue",
+        "Snowflake Interview Story",
+    ]
 )
+
 
 with tab_overview:
     left, right = st.columns([1.05, 0.95])
@@ -509,15 +775,22 @@ with tab_overview:
     with left:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.subheader("Signals by borough")
+
         if not filtered.empty and "borough" in filtered.columns:
-            borough_counts = filtered.groupby("borough", as_index=False).size().rename(columns={"size": "signals"})
+            borough_counts = (
+                filtered.groupby("borough", as_index=False)
+                .size()
+                .rename(columns={"size": "signals"})
+                .sort_values("signals", ascending=False)
+            )
+
             fig = px.bar(
-                borough_counts.sort_values("signals", ascending=False),
+                borough_counts,
                 x="borough",
                 y="signals",
                 text="signals",
-                title=None,
             )
+
             fig.update_layout(
                 height=390,
                 margin=dict(l=10, r=10, t=10, b=10),
@@ -527,22 +800,31 @@ with tab_overview:
                 paper_bgcolor="rgba(0,0,0,0)",
                 font=dict(color="#0f172a"),
             )
+
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No borough field found.")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.subheader("Risk mix")
+
         if not filtered.empty and "risk_level" in filtered.columns:
-            risk_counts = filtered.groupby("risk_level", as_index=False).size().rename(columns={"size": "signals"})
-            fig = px.donut(
+            risk_counts = (
+                filtered.groupby("risk_level", as_index=False)
+                .size()
+                .rename(columns={"size": "signals"})
+            )
+
+            fig = px.pie(
                 risk_counts,
                 names="risk_level",
                 values="signals",
                 hole=0.58,
             )
+
             fig.update_layout(
                 height=390,
                 margin=dict(l=10, r=10, t=10, b=10),
@@ -551,16 +833,35 @@ with tab_overview:
                 paper_bgcolor="rgba(0,0,0,0)",
                 font=dict(color="#0f172a"),
             )
+
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No risk level field found.")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Signal type breakdown")
-    if not filtered.empty and "alarm_type" in filtered.columns:
-        type_counts = filtered.groupby(["alarm_type", "risk_level"], as_index=False).size().rename(columns={"size": "signals"})
-        fig = px.bar(type_counts, x="alarm_type", y="signals", color="risk_level", barmode="group")
+
+    if (
+        not filtered.empty
+        and "alarm_type" in filtered.columns
+        and "risk_level" in filtered.columns
+    ):
+        type_counts = (
+            filtered.groupby(["alarm_type", "risk_level"], as_index=False)
+            .size()
+            .rename(columns={"size": "signals"})
+        )
+
+        fig = px.bar(
+            type_counts,
+            x="alarm_type",
+            y="signals",
+            color="risk_level",
+            barmode="group",
+        )
+
         fig.update_layout(
             height=360,
             margin=dict(l=10, r=10, t=10, b=10),
@@ -570,31 +871,58 @@ with tab_overview:
             paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#0f172a"),
         )
+
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No alarm type field found.")
+        st.info("No signal type field found.")
+
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 with tab_map:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Geospatial operations view")
-    st.caption("Each point represents a safety or hotspot signal. Larger points indicate higher relative severity.")
+    st.caption(
+        "Each point represents a safety or hotspot signal. Larger points indicate higher relative severity."
+    )
+
     build_map(filtered)
+
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 with tab_trends:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Trend validation")
-    st.caption("This section separates one-time spikes from patterns that deserve sustained attention.")
+    st.caption(
+        "This section separates one-time spikes from patterns that deserve sustained attention."
+    )
 
     trend_source = trends_df if not trends_df.empty else filtered
     trend_source = filter_data(trend_source, boroughs, risk_levels, alarm_types)
 
-    if not trend_source.empty and "event_date" in trend_source.columns and trend_source["event_date"].notna().any():
+    if (
+        not trend_source.empty
+        and "event_date" in trend_source.columns
+        and trend_source["event_date"].notna().any()
+    ):
         trend_source = trend_source.copy()
         trend_source["week"] = trend_source["event_date"].dt.to_period("W").dt.start_time
-        trend_counts = trend_source.groupby(["week", "risk_level"], as_index=False).size().rename(columns={"size": "signals"})
-        fig = px.line(trend_counts, x="week", y="signals", color="risk_level", markers=True)
+
+        trend_counts = (
+            trend_source.groupby(["week", "risk_level"], as_index=False)
+            .size()
+            .rename(columns={"size": "signals"})
+        )
+
+        fig = px.line(
+            trend_counts,
+            x="week",
+            y="signals",
+            color="risk_level",
+            markers=True,
+        )
+
         fig.update_layout(
             height=420,
             margin=dict(l=10, r=10, t=10, b=10),
@@ -604,18 +932,35 @@ with tab_trends:
             paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#0f172a"),
         )
+
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No date field found for trend validation. The review queue still works without dates.")
+        st.info(
+            "No usable date field found for trend validation. The review queue still works without dates."
+        )
 
     c1, c2, c3 = st.columns(3)
+
     with c1:
-        insight_card("Detect", "Identify abnormal route or location-level changes compared with expected behavior.")
+        insight_card(
+            "Detect",
+            "Identify abnormal route or location-level changes compared with expected behavior.",
+        )
+
     with c2:
-        insight_card("Validate", "Check whether the signal is persistent or only a one-time spike before escalating it.")
+        insight_card(
+            "Validate",
+            "Check whether the signal is persistent or only a one-time spike before escalating it.",
+        )
+
     with c3:
-        insight_card("Act", "Convert the signal into a clear recommendation for operations review.")
+        insight_card(
+            "Act",
+            "Convert the signal into a clear recommendation for operations review.",
+        )
+
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 with tab_review:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -624,25 +969,51 @@ with tab_review:
 
     display_cols = [
         c
-        for c in ["borough", "alarm_type", "risk_level", "severity", "event_date", "lat", "lon", "recommended_action"]
+        for c in [
+            "borough",
+            "alarm_type",
+            "risk_level",
+            "severity",
+            "event_date",
+            "lat",
+            "lon",
+            "recommended_action",
+        ]
         if c in filtered.columns
     ]
-    review = filtered.sort_values("severity", ascending=False) if "severity" in filtered.columns else filtered
-    st.dataframe(review[display_cols].head(500), use_container_width=True, hide_index=True)
 
-    csv = review.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download review queue",
-        csv,
-        file_name="nycsbus_review_queue.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    if not filtered.empty:
+        review = (
+            filtered.sort_values("severity", ascending=False)
+            if "severity" in filtered.columns
+            else filtered
+        )
+
+        st.dataframe(
+            review[display_cols].head(500),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        csv = review.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            "Download review queue",
+            csv,
+            file_name="nycsbus_review_queue.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    else:
+        st.info("No records match the current filters.")
+
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 with tab_snowflake:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("How to explain this project to Snowflake")
+
     st.markdown(
         """
         **Interview story:** I built this as an operations intelligence dashboard, not just a reporting page.
@@ -658,7 +1029,9 @@ with tab_snowflake:
         but an intelligence workflow helps the business understand what changed, whether it matters, and what to do next.
         """
     )
+
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 st.markdown(
     '<div class="footer-note">Public-safe demo built for interview presentation. Replace demo CSVs with approved internal data sources for production use.</div>',
